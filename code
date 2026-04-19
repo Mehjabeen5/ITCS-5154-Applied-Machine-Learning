@@ -1,1 +1,542 @@
+# Housing Price Prediction - Complete Code for AmesHousing.csv
+# Based on Sharma et al. (2024) methodology
+# Modified to work with single AmesHousing.csv file
 
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from scipy.stats import skew
+
+# Sklearn imports
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, KFold
+from sklearn.preprocessing import StandardScaler, LabelEncoder, RobustScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge, Lasso, ElasticNet, LinearRegression
+from sklearn.svm import SVR
+from sklearn.neural_network import MLPRegressor
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+
+# XGBoost
+import xgboost as xgb
+
+# Warnings
+import warnings
+warnings.filterwarnings('ignore')
+
+
+# Display settings
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', 100)
+
+# Set style for plots
+sns.set_style('whitegrid')
+plt.rcParams['figure.figsize'] = (12, 8)
+
+print("=" * 70)
+print("HOUSING PRICE PREDICTION - AMES DATASET")
+print("Based on Sharma et al. (2024) Methodology")
+print("=" * 70)
+print("\nAll libraries imported successfully!")
+print("=" * 70)
+
+
+# ============================================================================
+# 1. LOAD DATA
+# ============================================================================
+
+def load_data():
+    """Load the AmesHousing.csv dataset and split into train/test"""
+    print("\n" + "="*70)
+    print("STEP 1: LOADING DATA")
+    print("="*70)
+    
+    # Load the complete dataset
+    print("\nLoading AmesHousing.csv...")
+    df = pd.read_csv('data/AmesHousing.csv')
+    
+    print(f"Total dataset shape: {df.shape}")
+    print(f"Columns: {df.shape[1]}")
+    print(f"Rows: {df.shape[0]}")
+    
+    # Check if SalePrice column exists (target variable)
+    if 'SalePrice' in df.columns:
+        print(f"\n✓ Target variable 'SalePrice' found")
+    else:
+        # Check for alternative column names
+        price_cols = [col for col in df.columns if 'price' in col.lower() or 'sale' in col.lower()]
+        print(f"\nLooking for price column... Found: {price_cols}")
+    
+    # Display first few rows
+    print("\nFirst few columns:")
+    print(df.columns[:10].tolist())
+    
+    # Split into train and test (80/20 split)
+    print("\nSplitting data into train (80%) and test (20%)...")
+    train_df = df.sample(frac=0.8, random_state=42)
+    test_df = df.drop(train_df.index)
+    
+    print(f"Train set shape: {train_df.shape}")
+    print(f"Test set shape: {test_df.shape}")
+    
+    # Display target variable statistics
+    target_col = 'SalePrice' if 'SalePrice' in df.columns else 'SalePrice'
+    if target_col in train_df.columns:
+        print(f"\nTarget variable ({target_col}) statistics:")
+        print(train_df[target_col].describe())
+    
+    return train_df, test_df
+
+
+# ============================================================================
+# 2. EXPLORATORY DATA ANALYSIS (EDA)
+# ============================================================================
+
+def perform_eda(train):
+    """Perform exploratory data analysis"""
+    print("\n" + "="*70)
+    print("STEP 2: EXPLORATORY DATA ANALYSIS")
+    print("="*70)
+    
+    # Find the target column
+    target_col = 'SalePrice' if 'SalePrice' in train.columns else None
+    if target_col is None:
+        price_cols = [col for col in train.columns if 'price' in col.lower()]
+        if price_cols:
+            target_col = price_cols[0]
+    
+    if target_col:
+        # 2.1 Target variable distribution
+        print(f"\n2.1 Analyzing '{target_col}' distribution")
+        
+        plt.figure(figsize=(14, 5))
+        
+        plt.subplot(1, 2, 1)
+        sns.histplot(train[target_col], kde=True, bins=50)
+        plt.title(f'Distribution of {target_col}')
+        plt.xlabel(target_col)
+        
+        plt.subplot(1, 2, 2)
+        stats.probplot(train[target_col], plot=plt)
+        plt.title(f'Q-Q Plot of {target_col}')
+        
+        plt.tight_layout()
+        plt.savefig('outputs/figures/saleprice_distribution.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        print(f"Skewness: {train[target_col].skew():.2f}")
+        print(f"Kurtosis: {train[target_col].kurtosis():.2f}")
+    
+    # 2.2 Missing values analysis
+    print("\n2.2 Missing Values Analysis")
+    missing = train.isnull().sum()
+    missing = missing[missing > 0].sort_values(ascending=False)
+    missing_pct = (missing / len(train)) * 100
+    
+    if len(missing) > 0:
+        missing_df = pd.DataFrame({
+            'Missing_Count': missing,
+            'Percentage': missing_pct
+        })
+        
+        print(f"\nFound {len(missing)} columns with missing values")
+        print(missing_df.head(20))
+        
+        # Visualize missing values
+        plt.figure(figsize=(12, 6))
+        missing_pct[:20].plot(kind='barh')
+        plt.xlabel('Percentage Missing')
+        plt.title('Top 20 Features with Missing Values')
+        plt.tight_layout()
+        plt.savefig('outputs/figures/missing_values.png', dpi=300, bbox_inches='tight')
+        plt.show()
+    else:
+        print("No missing values found!")
+    
+    # 2.3 Correlation analysis
+    if target_col:
+        print(f"\n2.3 Correlation Analysis with {target_col}")
+        numeric_features = train.select_dtypes(include=[np.number]).columns
+        correlations = train[numeric_features].corr()[target_col].sort_values(ascending=False)
+        
+        print(f"\nTop 10 Positive Correlations with {target_col}:")
+        print(correlations[:11])  # Top 11 including SalePrice itself
+        
+        # Correlation heatmap (top features)
+        top_features = correlations[:11].index
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(train[top_features].corr(), annot=True, fmt='.2f', cmap='coolwarm', 
+                    square=True, linewidths=1)
+        plt.title('Correlation Heatmap - Top 10 Features')
+        plt.tight_layout()
+        plt.savefig('outputs/figures/correlation_heatmap.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        
+        return correlations
+    
+    return None
+
+
+# ============================================================================
+# 3. DATA PREPROCESSING
+# ============================================================================
+
+def preprocess_data(train, test):
+    """Preprocess training and test data"""
+    print("\n" + "="*70)
+    print("STEP 3: DATA PREPROCESSING")
+    print("="*70)
+    
+    # Find target column
+    target_col = 'SalePrice' if 'SalePrice' in train.columns else None
+    if target_col is None:
+        price_cols = [col for col in train.columns if 'price' in col.lower()]
+        if price_cols:
+            target_col = price_cols[0]
+    
+    # Store target variable and IDs
+    if target_col and target_col in train.columns:
+        y_train = train[target_col].copy()
+    else:
+        raise ValueError("Target column 'SalePrice' not found!")
+    
+    # Check for ID columns
+    id_cols = [col for col in train.columns if col.lower() in ['id', 'order', 'pid']]
+    
+    # Store IDs if they exist
+    train_id = train[id_cols[0]].copy() if id_cols else train.index.copy()
+    test_id = test[id_cols[0]].copy() if id_cols else test.index.copy()
+    
+    # Drop ID columns and target from features
+    cols_to_drop = id_cols + ([target_col] if target_col in train.columns else [])
+    train_features = train.drop(cols_to_drop, axis=1, errors='ignore')
+    test_features = test.drop(cols_to_drop, axis=1, errors='ignore')
+    
+    # Combine train and test for consistent preprocessing
+    n_train = train_features.shape[0]
+    all_data = pd.concat([train_features, test_features], axis=0, ignore_index=True)
+    
+    print(f"Combined data shape: {all_data.shape}")
+    print(f"Features: {all_data.shape[1]}")
+    
+    # 3.1 Handle missing values
+    print("\n3.1 Handling Missing Values")
+    
+    # Features where NA means 'None' or 'Not Applicable'
+    none_features = ['PoolQC', 'MiscFeature', 'Alley', 'Fence', 'FireplaceQu',
+                     'GarageType', 'Garage Finish', 'Garage Qual', 'Garage Cond',
+                     'BsmtQual', 'Bsmt Cond', 'Bsmt Exposure', 'BsmtFin Type 1', 'BsmtFin Type 2',
+                     'Mas Vnr Type']
+    
+    for col in none_features:
+        if col in all_data.columns:
+            all_data[col].fillna('None', inplace=True)
+    
+    # Fill numerical features with median
+    numerical_features = all_data.select_dtypes(include=[np.number]).columns
+    for col in numerical_features:
+        if all_data[col].isnull().sum() > 0:
+            all_data[col].fillna(all_data[col].median(), inplace=True)
+    
+    # Fill categorical features with mode
+    categorical_features = all_data.select_dtypes(include=['object']).columns
+    for col in categorical_features:
+        if all_data[col].isnull().sum() > 0:
+            all_data[col].fillna(all_data[col].mode()[0], inplace=True)
+    
+    print(f"Missing values after preprocessing: {all_data.isnull().sum().sum()}")
+    
+    # 3.2 Log transform target variable
+    print("\n3.2 Log Transforming Target Variable")
+    y_train_log = np.log1p(y_train)
+    print(f"Original skewness: {y_train.skew():.2f}")
+    print(f"Log-transformed skewness: {y_train_log.skew():.2f}")
+    
+    return all_data, y_train_log, n_train, train_id, test_id
+
+
+# ============================================================================
+# 4. FEATURE ENGINEERING
+# ============================================================================
+
+def engineer_features(all_data):
+    """Create new features and transform existing ones"""
+    print("\n" + "="*70)
+    print("STEP 4: FEATURE ENGINEERING")
+    print("="*70)
+    
+    print("\n4.1 Creating New Features")
+    
+    # Helper function to find column (handles spaces)
+    def find_col(pattern):
+        matches = [col for col in all_data.columns if pattern.lower() in col.lower().replace(' ', '')]
+        return matches[0] if matches else None
+    
+    # Total square footage (be flexible with column names)
+    basement_col = find_col('totalbsmtsf') or find_col('bsmtsf')
+    first_floor = find_col('1stflrsf') or find_col('firstfloor')
+    second_floor = find_col('2ndflrsf') or find_col('secondfloor')
+    
+    if basement_col and first_floor and second_floor:
+        all_data['TotalSF'] = (all_data[basement_col] + 
+                               all_data[first_floor] + 
+                               all_data[second_floor])
+        print("✓ Created TotalSF")
+    
+    # Total bathrooms
+    full_bath = find_col('fullbath')
+    bsmt_full = find_col('bsmtfullbath')
+    half_bath = find_col('halfbath')
+    bsmt_half = find_col('bsmthalfbath')
+    
+    if all([full_bath, bsmt_full, half_bath, bsmt_half]):
+        all_data['TotalBathrooms'] = (all_data[full_bath] + 
+                                      all_data[bsmt_full] + 
+                                      0.5 * all_data[half_bath] + 
+                                      0.5 * all_data[bsmt_half])
+        print("✓ Created TotalBathrooms")
+    
+    # House age
+    yr_sold = find_col('yrsold')
+    yr_built = find_col('yearbuilt')
+    if yr_sold and yr_built:
+        all_data['HouseAge'] = all_data[yr_sold] - all_data[yr_built]
+        print("✓ Created HouseAge")
+    
+    # Remodel flag
+    yr_remod = find_col('yearremodadd')
+    if yr_built and yr_remod:
+        all_data['Remodeled'] = (all_data[yr_remod] != all_data[yr_built]).astype(int)
+        print("✓ Created Remodeled flag")
+    
+    # Total porch area
+    porch_cols = [find_col(p) for p in ['openporch', 'enclosedporch', '3ssnporch', 'screenporch']]
+    porch_cols = [c for c in porch_cols if c]
+    if porch_cols:
+        all_data['TotalPorchSF'] = all_data[porch_cols].sum(axis=1)
+        print("✓ Created TotalPorchSF")
+    
+    # Has pool
+    pool_col = find_col('poolarea')
+    if pool_col:
+        all_data['HasPool'] = (all_data[pool_col] > 0).astype(int)
+        print("✓ Created HasPool")
+    
+    # Has garage
+    garage_col = find_col('garagearea')
+    if garage_col:
+        all_data['HasGarage'] = (all_data[garage_col] > 0).astype(int)
+        print("✓ Created HasGarage")
+    
+    # Has basement
+    if basement_col:
+        all_data['HasBsmt'] = (all_data[basement_col] > 0).astype(int)
+        print("✓ Created HasBsmt")
+    
+    print(f"\nTotal features now: {all_data.shape[1]}")
+    
+    # 4.2 Handle skewed features
+    print("\n4.2 Handling Skewed Features")
+    numeric_feats = all_data.dtypes[all_data.dtypes != "object"].index
+    
+    # Check skewness
+    skewed_feats = all_data[numeric_feats].apply(lambda x: skew(x.dropna())).sort_values(ascending=False)
+    skewness = pd.DataFrame({'Skew': skewed_feats})
+    
+    # Transform highly skewed features (skewness > 0.75)
+    skewed_features = skewness[abs(skewness['Skew']) > 0.75].index
+    print(f"Found {len(skewed_features)} highly skewed features")
+    
+    for feat in skewed_features:
+        all_data[feat] = np.log1p(all_data[feat])
+    
+    # 4.3 Encode categorical variables
+    print("\n4.3 Encoding Categorical Variables")
+    categorical_features = all_data.select_dtypes(include=['object']).columns
+    print(f"Encoding {len(categorical_features)} categorical features")
+    
+    # One-hot encoding for all categorical features
+    all_data = pd.get_dummies(all_data, drop_first=True)
+    
+    print(f"Final feature count after encoding: {all_data.shape[1]}")
+    
+    return all_data
+
+
+# (Continue with train_models, tune_xgboost, and other functions - exactly as before)
+# The rest of the code remains the same...
+
+# ============================================================================
+# 5. MODEL TRAINING - Using code from original main.py
+# ============================================================================
+
+def train_models(X_train, y_train, X_val, y_val):
+    """Train multiple models as per Sharma et al. (2024)"""
+    print("\n" + "="*70)
+    print("STEP 5: MODEL TRAINING")
+    print("="*70)
+    
+    results = {}
+    
+    # 5.1 Linear Regression (Baseline)
+    print("\n5.1 Training Linear Regression (Baseline)")
+    lr = LinearRegression()
+    lr.fit(X_train, y_train)
+    y_pred_lr = lr.predict(X_val)
+    rmse_lr = np.sqrt(mean_squared_error(y_val, y_pred_lr))
+    r2_lr = r2_score(y_val, y_pred_lr)
+    results['Linear Regression'] = {'RMSE': rmse_lr, 'R2': r2_lr, 'model': lr}
+    print(f"Linear Regression - RMSE: {rmse_lr:.5f}, R²: {r2_lr:.5f}")
+    
+    # 5.2 Random Forest
+    print("\n5.2 Training Random Forest")
+    rf = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    rf.fit(X_train, y_train)
+    y_pred_rf = rf.predict(X_val)
+    rmse_rf = np.sqrt(mean_squared_error(y_val, y_pred_rf))
+    r2_rf = r2_score(y_val, y_pred_rf)
+    results['Random Forest'] = {'RMSE': rmse_rf, 'R2': r2_rf, 'model': rf}
+    print(f"Random Forest - RMSE: {rmse_rf:.5f}, R²: {r2_rf:.5f}")
+    
+    # 5.3 XGBoost (Primary Model)
+    print("\n5.3 Training XGBoost")
+    xgb_model = xgb.XGBRegressor(
+        n_estimators=1000,
+        learning_rate=0.05,
+        max_depth=3,
+        random_state=42,
+        n_jobs=-1
+    )
+    xgb_model.fit(X_train, y_train)
+    y_pred_xgb = xgb_model.predict(X_val)
+    rmse_xgb = np.sqrt(mean_squared_error(y_val, y_pred_xgb))
+    r2_xgb = r2_score(y_val, y_pred_xgb)
+    results['XGBoost'] = {'RMSE': rmse_xgb, 'R2': r2_xgb, 'model': xgb_model}
+    print(f"XGBoost - RMSE: {rmse_xgb:.5f}, R²: {r2_xgb:.5f}")
+    
+    return results
+
+
+def compare_models(results):
+    """Compare all models"""
+    print("\n" + "="*70)
+    print("MODEL COMPARISON")
+    print("="*70)
+    
+    comparison_df = pd.DataFrame({
+        'Model': list(results.keys()),
+        'RMSE': [results[m]['RMSE'] for m in results.keys()],
+        'R²': [results[m]['R2'] for m in results.keys()]
+    }).sort_values('RMSE')
+    
+    print("\n" + comparison_df.to_string(index=False))
+    
+    # Visualize
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    axes[0].barh(comparison_df['Model'], comparison_df['RMSE'])
+    axes[0].set_xlabel('RMSE (lower is better)')
+    axes[0].set_title('Model Comparison - RMSE')
+    axes[0].invert_yaxis()
+    
+    axes[1].barh(comparison_df['Model'], comparison_df['R²'])
+    axes[1].set_xlabel('R² Score (higher is better)')
+    axes[1].set_title('Model Comparison - R²')
+    axes[1].invert_yaxis()
+    
+    plt.tight_layout()
+    plt.savefig('outputs/figures/model_comparison.png', dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    return comparison_df
+
+
+def make_predictions(model, X_test, test_id):
+    """Make predictions on test set"""
+    print("\n" + "="*70)
+    print("MAKING PREDICTIONS ON TEST SET")
+    print("="*70)
+    
+    y_pred_log = model.predict(X_test)
+    y_pred = np.expm1(y_pred_log)
+    
+    submission = pd.DataFrame({
+        'Id': test_id,
+        'SalePrice': y_pred
+    })
+    
+    submission.to_csv('outputs/submission.csv', index=False)
+    print("\n✓ Submission file created: outputs/submission.csv")
+    print(f"Predictions: {len(submission)} houses")
+    print(f"\nSample predictions:")
+    print(submission.head(10))
+    
+    return submission
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+def main():
+    """Main execution function"""
+    print("\n" + "="*70)
+    print("MAIN EXECUTION - AMES HOUSING PREDICTION")
+    print("="*70)
+    
+    # Step 1: Load data
+    train, test = load_data()
+    
+    # Step 2: EDA
+    correlations = perform_eda(train)
+    
+    # Step 3: Preprocess
+    all_data, y_train_log, n_train, train_id, test_id = preprocess_data(train, test)
+    
+    # Step 4: Feature engineering
+    all_data = engineer_features(all_data)
+    
+    # Step 5: Split back into train and test
+    X_train_full = all_data[:n_train]
+    X_test = all_data[n_train:]
+    
+    print(f"\nFinal shapes:")
+    print(f"X_train: {X_train_full.shape}")
+    print(f"X_test: {X_test.shape}")
+    
+    # Step 6: Create validation split
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_full, y_train_log, test_size=0.2, random_state=42
+    )
+    
+    # Step 7: Train models
+    results = train_models(X_train, y_train, X_val, y_val)
+    
+    # Step 8: Compare models
+    comparison = compare_models(results)
+    
+    # Step 9: Use best model for final predictions
+    best_model_name = comparison.iloc[0]['Model']
+    best_model = results[best_model_name]['model']
+    
+    print(f"\n✓ Best model: {best_model_name}")
+    
+    # Retrain on full training data
+    print(f"\nRetraining {best_model_name} on full training data...")
+    best_model.fit(X_train_full, y_train_log)
+    
+    # Make predictions
+    submission = make_predictions(best_model, X_test, test_id)
+    
+    print("\n" + "="*70)
+    print("✓ EXECUTION COMPLETED SUCCESSFULLY!")
+    print("="*70)
+    print("\nCheck outputs/figures/ for visualizations")
+    print("Check outputs/submission.csv for predictions")
+    
+    return results, comparison, submission
+
+
+if __name__ == "__main__":
+    results, comparison, submission = main()
